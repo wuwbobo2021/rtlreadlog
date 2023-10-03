@@ -77,7 +77,7 @@ typedef struct {
 	struct param_arr {
 		uint8_t type;
 		uint8_t len;
-		uint8_t data[0xff];
+		uint8_t data[0xff]; //actually the max length is shorter
 	} param_arrs[PARAM_NUM_MAX];
 } LogItem; //used in this program
 
@@ -325,7 +325,8 @@ static void read_loop()
 			p_param->type = head->subtype;
 			p_param->len = len - sizeof(LogHead);
 			memcpy(p_param->data, head->data, p_param->len);
-
+			p_param->data[p_param->len] = 0x00;
+			
 			log_item.cnt_param_arr++; break;
 			
 		case SUBTYPE_FORMAT:
