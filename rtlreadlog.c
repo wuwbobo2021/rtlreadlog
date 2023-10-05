@@ -2,7 +2,7 @@
 // by wuwbobo2021 <https://github.com/wuwbobo2021/rtlreadlog>, <wuwbobo@outlook.com>
 // Licenced under GPL v3.0.
 
-// last-modified date: 2023-10-03
+// last-modified date: 2023-10-05
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -18,8 +18,8 @@ typedef struct sp_port* SerialPort;
 
 // see trace.h in BEE2 SDK
 
-#define LOG_HEAD  0x7e
-#define TYPE_BEE2 0x21
+#define PACKET_HEAD  0x7e
+#define TYPE_BEE2    0x21
 
 enum {
     SUBTYPE_DIRECT = 0x00,
@@ -29,7 +29,7 @@ enum {
     SUBTYPE_BINARY = 0x50,
 };
 
-#define MODULE_APP 0x30
+#define MODULE_APP   0x30
 
 #define PARAM_BDADDR 0xbdbdbdbd
 #define PARAM_STRING 0xdadadada
@@ -41,16 +41,16 @@ enum {
 #pragma pack(1)
 
 typedef struct {
-	uint8_t  head;       // LOG_HEAD
+	uint8_t  head;       // PACKET_HEAD
 	uint8_t  len;
 	uint8_t  seq_num_1;
-	uint8_t  padding;    // checksum? TODO: figure out how to calculate
+	uint8_t  head_check; // head xor len xor seq_num_1
 	uint16_t seq_num_2;
 	uint8_t  type;       // only care about TYPE_BEE2
 	uint8_t  subtype;
 	
-	uint8_t  data[];     // not in LogHead
-} LogHead;
+	uint8_t  data[];     // not in PacketHead
+} PacketHead;
 
 typedef struct {
 	uint8_t  module;     // only care about MODULE_APP
@@ -63,11 +63,11 @@ typedef struct {
 
 #pragma pack(pop)
 
-#define LOG_DATA_LEN_MIN (sizeof(LogHead) + sizeof(FormatHead) - 1)
+#define FORMAT_PACKET_LEN_MIN (sizeof(PacketHead) + sizeof(FormatHead) - 1)
 
 typedef struct {
 	uint8_t  seq_num_1;
-	uint16_t  seq_num_2;
+	uint16_t seq_num_2;
 	
 	uint8_t cnt_param;
 	uint32_t* p_params; //char data_params[0xff];
@@ -161,7 +161,9 @@ static SerialPort port_open(const char* port_name)
 	if (sp_open(port, SP_MODE_READ) != SP_OK)
 		return NULL;
 	
-	sp_set_baudrate(port, DEFAULT_BAUD);
+	if (sp_set_baudrate(port, DEFAULT_BAUD) != SP_OK) {
+		sp_close(port); return NULL;
+	}
 	sp_set_bits(port, 8);
 	sp_set_parity(port, SP_PARITY_NONE);
 	sp_set_stopbits(port, 1);
@@ -193,7 +195,7 @@ static inline int escape_format_len(const char* p_per)
 	while (true) {
 		char ch = p_per[i];
 		switch (ch) {
-		// unfortunately floating point parameter isn't supported by log print
+		// unfortunately floating point parameter isn't supported by log printing
 		case 'd': case 'i': case 'u': case 'o': case 'x': case 'X': case 'c': case 'p':
 		case 's': case 'b': // %b is the only one not supported by C printf
 			return i + 1; //valid format
@@ -220,10 +222,15 @@ static inline int escape_format_len(const char* p_per)
 	return 0;
 }
 
-static void print_log_item(LogItem* log_item)
+static inline void print_log_head(uint8_t seq_num_1, uint16_t seq_num_2)
 {
 	print_time_head();
-	printf("%03d  %05d   ", log_item->seq_num_1, log_item->seq_num_2);
+	printf("%03d  %05d   ", seq_num_1, seq_num_2);
+}
+
+static void print_log_item(LogItem* log_item)
+{
+	print_log_head(log_item->seq_num_1, log_item->seq_num_2);
 	
 	if (log_item->cnt_param == 0) {
 		print_line(log_item->p_str_format); return;
@@ -299,15 +306,18 @@ static void read_loop()
 	/*static*/ LogItem log_item; //large object
 	log_item.cnt_param_arr = 0;
 	
-	uint8_t buf[0xff] = {0}; uint8_t len;
-	LogHead* head = (LogHead*)buf;
+	uint8_t buf[0xff + 1] = {0}; uint8_t len;
+	PacketHead* head = (PacketHead*)buf;
 	
 	while (true) {
+		// check for valid frame header
 		port_read(port, &buf[0], 1);
-		if (buf[0] != LOG_HEAD) continue;
+		if (buf[0] != PACKET_HEAD) continue;
 		port_read(port, &buf[1], 1);
-		len = buf[1]; if (! len) continue;
-		port_read(port, &buf[2], len - 2);
+		len = buf[1]; if (len < sizeof(PacketHead)) continue;
+		port_read(port, &buf[2], 2);
+		if ((buf[0] ^ buf[1] ^ buf[2]) != buf[3]) continue;
+		port_read(port, &buf[4], len - 4);
 		
 		#if DEBUG
 			print_binary(buf, len); print_str("\n");
@@ -316,21 +326,27 @@ static void read_loop()
 		if (head->type != TYPE_BEE2) continue;
 		
 		switch (head->subtype) {
+		case SUBTYPE_DIRECT:
+			buf[(unsigned int)len] = 0x00;
+			print_log_head(head->seq_num_1, head->seq_num_2);
+			print_line(buf + sizeof(PacketHead)); break;
+		
+		// these subtypes of packets carry parameters before SUBTYPE_FORMAT packet
 		case SUBTYPE_BDADDR: case SUBTYPE_STRING: case SUBTYPE_BINARY:
-			if (log_item.cnt_param_arr == PARAM_NUM_MAX || len <= sizeof(LogHead))
+			if (log_item.cnt_param_arr == PARAM_NUM_MAX || len <= sizeof(PacketHead))
 				break; //unlikely
 			
 			// load an array parameter into LogItem
 			struct param_arr* p_param = & log_item.param_arrs[log_item.cnt_param_arr];
 			p_param->type = head->subtype;
-			p_param->len = len - sizeof(LogHead);
+			p_param->len = len - sizeof(PacketHead);
 			memcpy(p_param->data, head->data, p_param->len);
 			p_param->data[p_param->len] = 0x00;
 			
 			log_item.cnt_param_arr++; break;
 			
-		case SUBTYPE_FORMAT:
-			if (len < LOG_DATA_LEN_MIN)
+		case SUBTYPE_FORMAT: //a formated message should be printed
+			if (len < FORMAT_PACKET_LEN_MIN)
 				goto clear_log_item;
 
 			FormatHead* format = (FormatHead*)(head->data);
@@ -341,10 +357,10 @@ static void read_loop()
 			log_item.seq_num_1 = head->seq_num_1;
 			log_item.seq_num_2 = head->seq_num_2;
 
-			if (len == LOG_DATA_LEN_MIN) //without cnt_param
+			if (len == FORMAT_PACKET_LEN_MIN) //without cnt_param
 				log_item.cnt_param = 0;
 			else {
-				uint8_t len_data = len - sizeof(LogHead) - sizeof(FormatHead);
+				uint8_t len_data = len - sizeof(PacketHead) - sizeof(FormatHead);
 				if (len_data / 4 >= format->cnt_param)
 					log_item.cnt_param = format->cnt_param;
 				else
