@@ -1,8 +1,8 @@
-// alternative for RTL8762A, RTL8762C, RTL8763B and RTL8761ATT Log Debug Analyser on Linux
+// Alternative for the Realtek RTL8762x Log Debug Analyzer on Linux
 // by wuwbobo2021 <https://github.com/wuwbobo2021/rtlreadlog>, <wuwbobo@outlook.com>
 // Licenced under GPL v3.0.
 
-// last-modified date: 2023-10-05
+// last-modified date: 2023-10-20
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -16,17 +16,22 @@ typedef struct sp_port* SerialPort;
 
 #define DEFAULT_BAUD 2000000
 
-// see trace.h in BEE2 SDK
+// see trace.h in the SDK provided by the vendor
 
 #define PACKET_HEAD  0x7e
-#define TYPE_BEE2    0x21
 
 enum {
-    SUBTYPE_DIRECT = 0x00,
-    SUBTYPE_FORMAT = 0x10,
-    SUBTYPE_BDADDR = 0x30,
-    SUBTYPE_STRING = 0x40,
-    SUBTYPE_BINARY = 0x50,
+	TYPE_BUMBLEBEE3 = 32,
+	TYPE_BEE2       = 33, //RTL8762C
+	TYPE_BEE3       = 35, //RTL8762E
+};
+
+enum {
+	SUBTYPE_DIRECT = 0x00,
+	SUBTYPE_FORMAT = 0x10,
+	SUBTYPE_BDADDR = 0x30,
+	SUBTYPE_STRING = 0x40,
+	SUBTYPE_BINARY = 0x50,
 };
 
 #define MODULE_APP   0x30
@@ -323,7 +328,8 @@ static void read_loop()
 			print_binary(buf, len); print_str("\n");
 		#endif
 		
-		if (head->type != TYPE_BEE2) continue;
+		if (head->type != TYPE_BEE2 && head->type != TYPE_BEE3 && head->type != TYPE_BUMBLEBEE3)
+			continue;
 		
 		switch (head->subtype) {
 		case SUBTYPE_DIRECT:
